@@ -41,7 +41,7 @@ Usage
 
   The dimensions of the blocks. Smaller is probably better. The default 4×4 should be good enough.
 
-Note: If the dimensions of the image aren't divisible by *blockx* and *blocky*, the right and/or bottom edges won't be processed. Pad or crop the image before using Bifrost.
+Note: If the dimensions of the image aren't divisible by *blockx* and *blocky*, the right and/or bottom edges won't be processed. These will contain uninitialized junk data. Pad or crop the image before using Bifrost.
 
 
 Types of rainbows

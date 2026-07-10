@@ -442,6 +442,11 @@ static void VS_CC bifrostCreate(const VSMap *in, VSMap *out, void *userData, VSC
    if (err)
       d.block_height = 4;
 
+   if (d.block_width < 1 || d.block_height < 1) {
+      vsapi->mapSetError(out, "Bifrost: blockx and blocky must be greater than 0.");
+      return;
+   }
+
    d.luma_thresh = d.luma_thresh * d.block_width * d.block_height;
 
    d.node = vsapi->mapGetNode(in, "clip", 0, 0);
@@ -670,6 +675,12 @@ static void VS_CC blockDiffCreate(const VSMap *in, VSMap *out, void *userData, V
 
    d.node = vsapi->mapGetNode(in, "clip", 0, 0);
    d.vi = vsapi->getVideoInfo(d.node);
+
+   if (d.block_width < 1 || d.block_height < 1) {
+      vsapi->mapSetError(out, "Bifrost: blockx and blocky must be greater than 0.");
+      vsapi->freeNode(d.node);
+      return;
+   }
 
    d.blocks_x = d.vi->width / d.block_width;
    d.blocks_y = d.vi->height / d.block_height;

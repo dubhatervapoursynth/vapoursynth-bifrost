@@ -1,8 +1,9 @@
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
-#include <vapoursynth/VapourSynth4.h>
-#include <vapoursynth/VSHelper4.h>
+#include <VapourSynth4.h>
+#include <VSHelper4.h>
 
 
 enum BlendDirection {
@@ -10,6 +11,30 @@ enum BlendDirection {
    bdPrev,
    bdBoth
 };
+
+
+static const char blockDiffPropName[] = "BifrostLumaDiff";
+
+
+// The per-block luma diffs travel between the two filters as an opaque byte blob
+// in a frame property, so the pointer is not necessarily aligned for int access.
+// memcpy of a single int compiles down to a plain load.
+static inline int loadBlockDiff(const char *diffs, int index) {
+   int value;
+   memcpy(&value, diffs + (ptrdiff_t)index * (ptrdiff_t)sizeof(int), sizeof(value));
+   return value;
+}
+
+
+// Returns NULL unless the property holds exactly one diff per block.
+static const char *getBlockDiffs(const VSMap *props, int blocks, const VSAPI *vsapi) {
+   int err;
+   int size = vsapi->mapGetDataSize(props, blockDiffPropName, 0, &err);
+   if (err || size != (int)(blocks * sizeof(int)))
+      return NULL;
+
+   return vsapi->mapGetData(props, blockDiffPropName, 0, NULL);
+}
 
 
 typedef struct {
@@ -129,10 +154,12 @@ static void processBlockRainbowMask(uint8_t *restrict dst_u, uint8_t *restrict d
 }
 
 
+// Writes the raw mask into dst_u only; processBlockRainbowMask turns that into the
+// denoised mask in dst_v.
 static void makeBlockRainbowMask(const uint8_t *srcp_u, const uint8_t *srcp_v,
                                  const uint8_t *srcc_u, const uint8_t *srcc_v,
                                  const uint8_t *srcn_u, const uint8_t *srcn_v,
-                                 uint8_t *restrict dst_u, uint8_t *restrict dst_v,
+                                 uint8_t *restrict dst_u,
                                  int block_width_uv, int block_height_uv, ptrdiff_t stride_uv, int variation) {
 
    for (int y = 0; y < block_height_uv; y++) {
@@ -167,7 +194,6 @@ static void makeBlockRainbowMask(const uint8_t *srcp_u, const uint8_t *srcp_v,
       srcn_v += stride_uv;
 
       dst_u += stride_uv;
-      dst_v += stride_uv;
    }
 }
 
@@ -207,55 +233,51 @@ static int blockLumaDiff(const uint8_t *src1_y, const uint8_t *src2_y, int block
 static const VSFrame *VS_CC bifrostGetFrame(int n, int activationReason, void *instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
    BifrostData *d = (BifrostData *)instanceData;
 
-#define min(a, b)  (((a) < (b)) ? (a) : (b))
-#define max(a, b)  (((a) > (b)) ? (a) : (b))
-
    if (activationReason == arInitial) {
-      vsapi->requestFrameFilter(max(n - d->offset*2, 0), d->node, frameCtx);
-      vsapi->requestFrameFilter(max(n - d->offset,   0), d->node, frameCtx);
+      vsapi->requestFrameFilter(VSMAX(n - d->offset*2, 0), d->node, frameCtx);
+      vsapi->requestFrameFilter(VSMAX(n - d->offset,   0), d->node, frameCtx);
       vsapi->requestFrameFilter(n, d->node, frameCtx);
-      vsapi->requestFrameFilter(min(n + d->offset,   d->vi->numFrames-1), d->node, frameCtx);
-      vsapi->requestFrameFilter(min(n + d->offset*2, d->vi->numFrames-1), d->node, frameCtx);
+      vsapi->requestFrameFilter(VSMIN(n + d->offset,   d->vi->numFrames-1), d->node, frameCtx);
+      vsapi->requestFrameFilter(VSMIN(n + d->offset*2, d->vi->numFrames-1), d->node, frameCtx);
 
       vsapi->requestFrameFilter(n, d->altnode, frameCtx);
    } else if (activationReason == arAllFramesReady) {
-      const VSFrame *srcpp = vsapi->getFrameFilter(max(n - d->offset*2, 0), d->node, frameCtx);
-      const VSFrame *srcp  = vsapi->getFrameFilter(max(n - d->offset,   0), d->node, frameCtx);
+      const VSFrame *srcpp = vsapi->getFrameFilter(VSMAX(n - d->offset*2, 0), d->node, frameCtx);
+      const VSFrame *srcp  = vsapi->getFrameFilter(VSMAX(n - d->offset,   0), d->node, frameCtx);
       const VSFrame *srcc  = vsapi->getFrameFilter(n, d->node, frameCtx);
-      const VSFrame *srcn  = vsapi->getFrameFilter(min(n + d->offset,   d->vi->numFrames-1), d->node, frameCtx);
-      const VSFrame *srcnn = vsapi->getFrameFilter(min(n + d->offset*2, d->vi->numFrames-1), d->node, frameCtx);
+      const VSFrame *srcn  = vsapi->getFrameFilter(VSMIN(n + d->offset,   d->vi->numFrames-1), d->node, frameCtx);
+      const VSFrame *srcnn = vsapi->getFrameFilter(VSMIN(n + d->offset*2, d->vi->numFrames-1), d->node, frameCtx);
 
       const VSFrame *altsrcc = vsapi->getFrameFilter(n, d->altnode, frameCtx);
 
-#undef min
-#undef max
-      const VSFrame *planeSrc[3] = { srcc, NULL, NULL };
-      const int planes[3] = { 0 };
+      int blocks_x = d->blocks_x;
+      int blocks_y = d->blocks_y;
+
+      // Chroma starts out as a copy of altclip so that blocks Bifrost decides not
+      // to touch - including any strip left over when the dimensions aren't a whole
+      // number of blocks - hold defined pixels rather than uninitialized memory.
+      const VSFrame *planeSrc[3] = { srcc, altsrcc, altsrcc };
+      const int planes[3] = { 0, 1, 2 };
       VSFrame *dst = vsapi->newVideoFrame2(&d->vi->format, d->vi->width, d->vi->height, planeSrc, planes, srcc, core);
       VSMap *dst_props = vsapi->getFramePropertiesRW(dst);
-      const char *prop = "BifrostLumaDiff";
-      vsapi->mapDeleteKey(dst_props, prop);
+      vsapi->mapDeleteKey(dst_props, blockDiffPropName);
 
 
       const uint8_t *srcpp_u = vsapi->getReadPtr(srcpp, 1);
       const uint8_t *srcpp_v = vsapi->getReadPtr(srcpp, 2);
-      const VSMap *srcpp_props = vsapi->getFramePropertiesRO(srcpp);
-      const int *srcpp_diffs = (const int *)vsapi->mapGetData(srcpp_props, prop, 0, NULL);
+      const char *srcpp_diffs = getBlockDiffs(vsapi->getFramePropertiesRO(srcpp), blocks_x * blocks_y, vsapi);
 
       const uint8_t *srcp_u = vsapi->getReadPtr(srcp, 1);
       const uint8_t *srcp_v = vsapi->getReadPtr(srcp, 2);
-      const VSMap *srcp_props = vsapi->getFramePropertiesRO(srcp);
-      const int *srcp_diffs = (const int *)vsapi->mapGetData(srcp_props, prop, 0, NULL);
+      const char *srcp_diffs = getBlockDiffs(vsapi->getFramePropertiesRO(srcp), blocks_x * blocks_y, vsapi);
 
       const uint8_t *srcc_u = vsapi->getReadPtr(srcc, 1);
       const uint8_t *srcc_v = vsapi->getReadPtr(srcc, 2);
-      const VSMap *srcc_props = vsapi->getFramePropertiesRO(srcc);
-      const int *srcc_diffs = (const int *)vsapi->mapGetData(srcc_props, prop, 0, NULL);
+      const char *srcc_diffs = getBlockDiffs(vsapi->getFramePropertiesRO(srcc), blocks_x * blocks_y, vsapi);
 
       const uint8_t *srcn_u = vsapi->getReadPtr(srcn, 1);
       const uint8_t *srcn_v = vsapi->getReadPtr(srcn, 2);
-      const VSMap *srcn_props = vsapi->getFramePropertiesRO(srcn);
-      const int *srcn_diffs = (const int *)vsapi->mapGetData(srcn_props, prop, 0, NULL);
+      const char *srcn_diffs = getBlockDiffs(vsapi->getFramePropertiesRO(srcn), blocks_x * blocks_y, vsapi);
 
       const uint8_t *srcnn_u = vsapi->getReadPtr(srcnn, 1);
       const uint8_t *srcnn_v = vsapi->getReadPtr(srcnn, 2);
@@ -271,14 +293,23 @@ static const VSFrame *VS_CC bifrostGetFrame(int n, int activationReason, void *i
       int block_width_uv = d->block_width_uv;
       int block_height_uv = d->block_height_uv;
 
-      int blocks_x = d->blocks_x;
-      int blocks_y = d->blocks_y;
+      if (!srcpp_diffs || !srcp_diffs || !srcc_diffs || !srcn_diffs) {
+         vsapi->setFilterError("Bifrost: Frame is missing the block difference data produced by BlockDiff.", frameCtx);
+         vsapi->freeFrame(dst);
+         vsapi->freeFrame(srcpp);
+         vsapi->freeFrame(srcp);
+         vsapi->freeFrame(srcc);
+         vsapi->freeFrame(srcn);
+         vsapi->freeFrame(srcnn);
+         vsapi->freeFrame(altsrcc);
+         return NULL;
+      }
 
       for (int y = 0; y < blocks_y; y++) {
          for (int x = 0; x < blocks_x; x++) {
             int current_block = y*blocks_x + x;
-            float ldprev = srcp_diffs[current_block];
-            float ldnext = srcc_diffs[current_block];
+            float ldprev = loadBlockDiff(srcp_diffs, current_block);
+            float ldnext = loadBlockDiff(srcc_diffs, current_block);
             float ldprevprev = 0.0f;
             float ldnextnext = 0.0f;
 
@@ -291,9 +322,9 @@ static const VSFrame *VS_CC bifrostGetFrame(int n, int activationReason, void *i
             }
 
             if (ldnext > d->luma_thresh) {
-               ldprevprev = srcpp_diffs[current_block];
+               ldprevprev = loadBlockDiff(srcpp_diffs, current_block);
             } else if (ldprev > d->luma_thresh) {
-               ldnextnext = srcn_diffs[current_block];
+               ldnextnext = loadBlockDiff(srcn_diffs, current_block);
             }
 
             //two consecutive frames in one direction to generate mask?
@@ -310,19 +341,19 @@ static const VSFrame *VS_CC bifrostGetFrame(int n, int activationReason, void *i
                makeBlockRainbowMask(srcpp_u + block_width_uv*x, srcpp_v + block_width_uv*x,
                                      srcp_u + block_width_uv*x,  srcp_v + block_width_uv*x,
                                      srcc_u + block_width_uv*x,  srcc_v + block_width_uv*x,
-                                      dst_u + block_width_uv*x,   dst_v + block_width_uv*x,
+                                      dst_u + block_width_uv*x,
                                     block_width_uv, block_height_uv, stride_uv, d->variation);
             } else if (ldprev > d->luma_thresh) {
                makeBlockRainbowMask( srcc_u + block_width_uv*x,  srcc_v + block_width_uv*x,
                                      srcn_u + block_width_uv*x,  srcn_v + block_width_uv*x,
                                     srcnn_u + block_width_uv*x, srcnn_v + block_width_uv*x,
-                                      dst_u + block_width_uv*x,   dst_v + block_width_uv*x,
+                                      dst_u + block_width_uv*x,
                                     block_width_uv, block_height_uv, stride_uv, d->variation);
             } else {
                makeBlockRainbowMask(srcp_u + block_width_uv*x, srcp_v + block_width_uv*x,
                                     srcc_u + block_width_uv*x, srcc_v + block_width_uv*x,
                                     srcn_u + block_width_uv*x, srcn_v + block_width_uv*x,
-                                     dst_u + block_width_uv*x,  dst_v + block_width_uv*x,
+                                     dst_u + block_width_uv*x,
                                     block_width_uv, block_height_uv, stride_uv, d->variation);
             }
 
@@ -379,7 +410,7 @@ static const VSFrame *VS_CC bifrostGetFrame(int n, int activationReason, void *i
       return dst;
    }
 
-   return 0;
+   return NULL;
 }
 
 
@@ -478,6 +509,37 @@ static void VS_CC bifrostCreate(const VSMap *in, VSMap *out, void *userData, VSC
       return;
    }
 
+   // These depend only on the format, which SeparateFields and BlockDiff leave
+   // alone, so check them before invoking anything.
+   if (d.block_width % (1 << d.vi->format.subSamplingW) ||
+       d.block_height % (1 << d.vi->format.subSamplingH)) {
+      vsapi->mapSetError(out, "Bifrost: The requested block size is incompatible with the clip's subsampling.");
+      vsapi->freeNode(d.node);
+      vsapi->freeNode(d.altnode);
+      return;
+   }
+
+   d.block_width_uv = d.block_width >> d.vi->format.subSamplingW;
+   d.block_height_uv = d.block_height >> d.vi->format.subSamplingH;
+
+   if (d.block_width_uv < 2 || d.block_height_uv < 2) {
+      vsapi->mapSetError(out, "Bifrost: The requested block size is too small.");
+      vsapi->freeNode(d.node);
+      vsapi->freeNode(d.altnode);
+      return;
+   }
+
+   // There has to be room for at least one whole block, or bifrostGetFrame would
+   // have nothing to process. Checked here, against the height SeparateFields will
+   // produce, so the error names Bifrost rather than the BlockDiff invoked below.
+   if (d.vi->width / d.block_width < 1 ||
+       (d.interlaced ? d.vi->height / 2 : d.vi->height) / d.block_height < 1) {
+      vsapi->mapSetError(out, "Bifrost: blockx and blocky must not be larger than the frame.");
+      vsapi->freeNode(d.node);
+      vsapi->freeNode(d.altnode);
+      return;
+   }
+
    VSMap *args = vsapi->createMap();
    VSMap *ret = NULL;
    VSPlugin *stdPlugin = vsapi->getPluginByID(VSH_STD_PLUGIN_ID, core);
@@ -525,36 +587,39 @@ static void VS_CC bifrostCreate(const VSMap *in, VSMap *out, void *userData, VSC
 
    d.vi = vsapi->getVideoInfo(d.node);
 
-   if (d.block_width % (1 << d.vi->format.subSamplingW) ||
-       d.block_height % (1 << d.vi->format.subSamplingH)) {
-      vsapi->mapSetError(out, "Bifrost: The requested block size is incompatible with the clip's subsampling.");
-      vsapi->freeMap(args);
-      vsapi->freeNode(d.node);
-      vsapi->freeNode(d.altnode);
-      return;
-   }
-
-   d.block_width_uv = d.block_width >> d.vi->format.subSamplingW;
-   d.block_height_uv = d.block_height >> d.vi->format.subSamplingH;
-
-   if (d.block_width_uv < 2 || d.block_height_uv < 2) {
-      vsapi->mapSetError(out, "Bifrost: The requested block size is too small.");
-      vsapi->freeMap(args);
-      vsapi->freeNode(d.node);
-      vsapi->freeNode(d.altnode);
-      return;
-   }
-
    d.blocks_x = d.vi->width / d.block_width;
    d.blocks_y = d.vi->height / d.block_height;
 
+   // Backstop: the check above should already have caught this, but re-verify
+   // against the clip actually being wrapped rather than the one passed in.
+   if (d.blocks_x < 1 || d.blocks_y < 1) {
+      vsapi->mapSetError(out, "Bifrost: blockx and blocky must not be larger than the frame.");
+      vsapi->freeMap(args);
+      vsapi->freeNode(d.node);
+      vsapi->freeNode(d.altnode);
+      return;
+   }
 
    data = malloc(sizeof(d));
+   if (!data) {
+      vsapi->mapSetError(out, "Bifrost: Out of memory.");
+      vsapi->freeMap(args);
+      vsapi->freeNode(d.node);
+      vsapi->freeNode(d.altnode);
+      return;
+   }
    *data = d;
 
    VSFilterDependency deps[2] = { {data->node, rpGeneral}, {data->altnode, rpStrictSpatial} };
 
    vsapi->createVideoFilter(out, "Bifrost", data->vi, bifrostGetFrame, bifrostFree, fmParallel, deps, 2, data, core);
+
+   // Bail out before reading the node back out of the map below, which would
+   // otherwise hand a NULL node to mapConsumeNode.
+   if (vsapi->mapGetError(out)) {
+      vsapi->freeMap(args);
+      return;
+   }
 
    if (d.interlaced) {
       vsapi->mapSetInt(args, "tff", 1, maReplace);
@@ -596,16 +661,12 @@ typedef struct {
 static const VSFrame *VS_CC blockDiffGetFrame(int n, int activationReason, void *instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
    BlockDiffData *d = (BlockDiffData *)instanceData;
 
-#define min(a, b)  (((a) < (b)) ? (a) : (b))
-#define max(a, b)  (((a) > (b)) ? (a) : (b))
    if (activationReason == arInitial) {
       vsapi->requestFrameFilter(n, d->node, frameCtx);
-      vsapi->requestFrameFilter(min(n + d->offset, d->vi->numFrames-1), d->node, frameCtx);
+      vsapi->requestFrameFilter(VSMIN(n + d->offset, d->vi->numFrames-1), d->node, frameCtx);
    } else if (activationReason == arAllFramesReady) {
       const VSFrame *srcc = vsapi->getFrameFilter(n, d->node, frameCtx);
-      const VSFrame *srcn = vsapi->getFrameFilter(min(n + d->offset, d->vi->numFrames-1), d->node, frameCtx);
-#undef min
-#undef max
+      const VSFrame *srcn = vsapi->getFrameFilter(VSMIN(n + d->offset, d->vi->numFrames-1), d->node, frameCtx);
 
       VSFrame *dst = vsapi->copyFrame(srcc, core);
 
@@ -622,18 +683,25 @@ static const VSFrame *VS_CC blockDiffGetFrame(int n, int activationReason, void 
       int blocks_x = d->blocks_x;
       int blocks_y = d->blocks_y;
 
-      void *diffs = malloc(blocks_x * blocks_y * sizeof(int));
+      int *diffs = malloc(blocks_x * blocks_y * sizeof(int));
+      if (!diffs) {
+         vsapi->setFilterError("BlockDiff: Out of memory.", frameCtx);
+         vsapi->freeFrame(dst);
+         vsapi->freeFrame(srcc);
+         vsapi->freeFrame(srcn);
+         return NULL;
+      }
 
       for (int y = 0; y < blocks_y; y++) {
          for (int x = 0; x < blocks_x; x++) {
-            ((int *)diffs)[y*blocks_x+x] = blockLumaDiff(srcc_y + block_width*x, srcn_y + block_width*x, block_width, block_height, stride_y);
+            diffs[y*blocks_x+x] = blockLumaDiff(srcc_y + block_width*x, srcn_y + block_width*x, block_width, block_height, stride_y);
          }
 
          srcc_y += block_height * stride_y;
          srcn_y += block_height * stride_y;
       }
 
-      vsapi->mapSetData(props, "BifrostLumaDiff", (const char *)diffs, blocks_x * blocks_y * sizeof(int), dtBinary, maReplace);
+      vsapi->mapSetData(props, blockDiffPropName, (const char *)diffs, blocks_x * blocks_y * sizeof(int), dtBinary, maReplace);
       free(diffs);
 
       vsapi->freeFrame(srcc);
@@ -677,7 +745,16 @@ static void VS_CC blockDiffCreate(const VSMap *in, VSMap *out, void *userData, V
    d.vi = vsapi->getVideoInfo(d.node);
 
    if (d.block_width < 1 || d.block_height < 1) {
-      vsapi->mapSetError(out, "Bifrost: blockx and blocky must be greater than 0.");
+      vsapi->mapSetError(out, "BlockDiff: blockx and blocky must be greater than 0.");
+      vsapi->freeNode(d.node);
+      return;
+   }
+
+   if (!vsh_isConstantVideoFormat(d.vi) ||
+       d.vi->format.colorFamily != cfYUV ||
+       d.vi->format.sampleType != stInteger ||
+       d.vi->format.bitsPerSample != 8) {
+      vsapi->mapSetError(out, "BlockDiff: Only constant format 8 bit integer YUV allowed.");
       vsapi->freeNode(d.node);
       return;
    }
@@ -685,16 +762,18 @@ static void VS_CC blockDiffCreate(const VSMap *in, VSMap *out, void *userData, V
    d.blocks_x = d.vi->width / d.block_width;
    d.blocks_y = d.vi->height / d.block_height;
 
-   if (!vsh_isConstantVideoFormat(d.vi) ||
-       d.vi->format.colorFamily != cfYUV ||
-       d.vi->format.sampleType != stInteger ||
-       d.vi->format.bitsPerSample != 8) {
-      vsapi->mapSetError(out, "Bifrost: Only constant format 8 bit integer YUV allowed.");
+   if (d.blocks_x < 1 || d.blocks_y < 1) {
+      vsapi->mapSetError(out, "BlockDiff: blockx and blocky must not be larger than the frame.");
       vsapi->freeNode(d.node);
       return;
    }
 
    data = malloc(sizeof(d));
+   if (!data) {
+      vsapi->mapSetError(out, "BlockDiff: Out of memory.");
+      vsapi->freeNode(d.node);
+      return;
+   }
    *data = d;
 
    VSFilterDependency deps[1] = { {data->node, rpGeneral} };

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["meson-python", "VapourSynth>=74"]
+build-backend = "mesonpy"
+
+[project]
+name = "vapoursynth-bifrost"
+description = "Temporal derainbowing filter for VapourSynth"
+readme = "readme.rst"
+requires-python = ">=3.12"
+license = "WTFPL"
+license-files = ["LICENSE"]
+authors = [
+    {name = "Fredrik Mellbin", email = "fredrik.mellbin@gmail.com"},
+]
+keywords = ["video", "rainbow", "derainbow", "chroma"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Plugins",
+    "Natural Language :: English",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX",
+    "Operating System :: Unix",
+    "Programming Language :: C",
+    "Topic :: Multimedia :: Video",
+]
+dependencies = ["VapourSynth"]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/dubhatervapoursynth/vapoursynth-bifrost.git"
+Issues = "https://github.com/dubhatervapoursynth/vapoursynth-bifrost/issues"
+
+[tool.meson-python.wheel]
+exclude = ["*/*.dll.a", "*/*.lib"]

@@ -39,9 +39,9 @@ Usage
 
 - blocky
 
-  The dimensions of the blocks. Smaller is probably better. The default 4×4 should be good enough.
+  The dimensions of the blocks. Smaller is probably better. The default 4×4 should be good enough. They must be a multiple of the clip's subsampling, at least two chroma samples wide and tall, and no larger than the frame.
 
-Note: If the dimensions of the image aren't divisible by *blockx* and *blocky*, the right and/or bottom edges won't be processed. These will contain uninitialized junk data. Pad or crop the image before using Bifrost.
+Note: If the dimensions of the image aren't divisible by *blockx* and *blocky*, the right and/or bottom edges won't be processed. The chroma of those edges is copied from *altclip*, same as for any other block Bifrost can't process.
 
 
 Types of rainbows
@@ -76,13 +76,33 @@ In this case, Bifrost should be used in interlaced mode, right after the source 
    # ivtc here
 
 
-Compilation
-===========
+Installation
+============
 
 ::
 
-   ./autogen.sh
-   ./configure
-   make
+    pip install vapoursynth-bifrost
 
-DLLs for VapourSynth and for Avisynth 2.5.8+ can be found in the "releases" section.
+
+Compilation
+===========
+
+Requires VapourSynth to be installed and importable by the Python that Meson finds,
+because the include path is queried with ``vapoursynth.get_include()``.
+
+::
+
+    meson setup build
+    ninja -C build
+
+To build a wheel instead::
+
+    python -m build
+
+DLLs for Avisynth 2.5.8+ can be found in the "releases" section.
+
+
+License
+=======
+
+The license is WTFPL; see the LICENSE file.

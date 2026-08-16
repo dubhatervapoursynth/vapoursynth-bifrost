@@ -5,7 +5,7 @@ Bifrost is a temporal derainbowing filter created by Fredrik Mellbin.
 
 The original Avisynth plugin (version 1.1) worked on the whole frame or not at all. This version works on blocks, meaning that static parts of the image can be processed even if something moves on screen.
 
-The VapourSynth plugin will accept any 8 bit YUV formats. The Avisynth plugin is still limited to YV12.
+The VapourSynth plugin will accept any 8 to 16 bit integer YUV format. The Avisynth plugin is still limited to YV12.
 
 
 Usage
@@ -26,6 +26,8 @@ Usage
 - variation
 
   Controls how big a chroma change must be in order to be considered a rainbow. Increasing this can reduce false positives.
+
+Note: *luma_thresh* and *variation* are given in 8 bit sample units and are scaled to the clip's bit depth internally, so the same values behave the same way at any depth.
 
 - conservative_mask
 

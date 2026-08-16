@@ -29,12 +29,18 @@ void VS_CC filterFree(void *instanceData, [[maybe_unused]] VSCore *core, [[maybe
 }
 
 
+template <typename T>
+[[nodiscard]] constexpr T selectOnBitsPerSample(int bitsPerSample, T o8, T o16) noexcept {
+   return bitsPerSample == 8 ? o8 : o16;
+}
+
+
 // The per-block luma diffs travel between the two filters as an opaque byte blob
-// in a frame property, so the pointer is not necessarily aligned for int access.
-// memcpy of a single int compiles down to a plain load.
-int loadBlockDiff(const char *diffs, int index) {
-   int value;
-   std::memcpy(&value, diffs + static_cast<ptrdiff_t>(index) * static_cast<ptrdiff_t>(sizeof(int)), sizeof(value));
+// in a frame property, so the pointer is not necessarily aligned for int64_t access.
+// memcpy of a single value compiles down to a plain load.
+int64_t loadBlockDiff(const char *diffs, int index) {
+   int64_t value;
+   std::memcpy(&value, diffs + static_cast<ptrdiff_t>(index) * static_cast<ptrdiff_t>(sizeof(int64_t)), sizeof(value));
    return value;
 }
 
@@ -43,7 +49,7 @@ int loadBlockDiff(const char *diffs, int index) {
 const char *getBlockDiffs(const VSMap *props, int blocks, const VSAPI *vsapi) {
    int err;
    int size = vsapi->mapGetDataSize(props, blockDiffPropName, 0, &err);
-   if (err || size != static_cast<int>(blocks * sizeof(int)))
+   if (err || size != static_cast<int>(blocks * sizeof(int64_t)))
       return nullptr;
 
    return vsapi->mapGetData(props, blockDiffPropName, 0, nullptr);
@@ -82,10 +88,11 @@ struct BifrostData {
 };
 
 
-void applyBlockRainbowMask(const uint8_t *srcp_u, const uint8_t *srcp_v,
-                           const uint8_t *srcc_u, const uint8_t *srcc_v,
-                           const uint8_t *srcn_u, const uint8_t *srcn_v,
-                           uint8_t *VS_RESTRICT dst_u, uint8_t *VS_RESTRICT dst_v,
+template <typename PixelType>
+void applyBlockRainbowMask(const PixelType *srcp_u, const PixelType *srcp_v,
+                           const PixelType *srcc_u, const PixelType *srcc_v,
+                           const PixelType *srcn_u, const PixelType *srcn_v,
+                           PixelType *VS_RESTRICT dst_u, PixelType *VS_RESTRICT dst_v,
                            int block_width_uv, int block_height_uv, ptrdiff_t stride_uv, BlendDirection blenddirection) {
 
    for (int y = 0; y < block_height_uv; y++) {
@@ -136,11 +143,12 @@ void applyBlockRainbowMask(const uint8_t *srcp_u, const uint8_t *srcp_v,
 }
 
 
-void processBlockRainbowMask(uint8_t *VS_RESTRICT dst_u, uint8_t *VS_RESTRICT dst_v,
+template <typename PixelType>
+void processBlockRainbowMask(PixelType *VS_RESTRICT dst_u, PixelType *VS_RESTRICT dst_v,
                              int block_width_uv, int block_height_uv, ptrdiff_t stride_uv, bool conservative_mask) {
 
    // Maybe needed later.
-   uint8_t *tmp = dst_v;
+   PixelType *tmp = dst_v;
 
    //denoise mask, remove marked pixels with no horizontal marked neighbors
    for (int y = 0; y < block_height_uv; y++) {
@@ -181,21 +189,22 @@ void processBlockRainbowMask(uint8_t *VS_RESTRICT dst_u, uint8_t *VS_RESTRICT ds
 
 // Writes the raw mask into dst_u only; processBlockRainbowMask turns that into the
 // denoised mask in dst_v.
-void makeBlockRainbowMask(const uint8_t *srcp_u, const uint8_t *srcp_v,
-                          const uint8_t *srcc_u, const uint8_t *srcc_v,
-                          const uint8_t *srcn_u, const uint8_t *srcn_v,
-                          uint8_t *VS_RESTRICT dst_u,
+template <typename PixelType>
+void makeBlockRainbowMask(const PixelType *srcp_u, const PixelType *srcp_v,
+                          const PixelType *srcc_u, const PixelType *srcc_v,
+                          const PixelType *srcn_u, const PixelType *srcn_v,
+                          PixelType *VS_RESTRICT dst_u,
                           int block_width_uv, int block_height_uv, ptrdiff_t stride_uv, int variation) {
 
    for (int y = 0; y < block_height_uv; y++) {
       for (int x = 0; x < block_width_uv; x++) {
-         uint8_t up = srcp_u[x];
-         uint8_t uc = srcc_u[x];
-         uint8_t un = srcn_u[x];
+         int up = srcp_u[x];
+         int uc = srcc_u[x];
+         int un = srcn_u[x];
 
-         uint8_t vp = srcp_v[x];
-         uint8_t vc = srcc_v[x];
-         uint8_t vn = srcn_v[x];
+         int vp = srcp_v[x];
+         int vc = srcc_v[x];
+         int vn = srcn_v[x];
 
          int ucup = uc-up;
          int ucun = uc-un;
@@ -223,13 +232,14 @@ void makeBlockRainbowMask(const uint8_t *srcp_u, const uint8_t *srcp_v,
 }
 
 
-void copyChromaBlock(uint8_t *VS_RESTRICT dst_u, uint8_t *VS_RESTRICT dst_v,
-                     const uint8_t *src_u, const uint8_t *src_v,
+template <typename PixelType>
+void copyChromaBlock(PixelType *VS_RESTRICT dst_u, PixelType *VS_RESTRICT dst_v,
+                     const PixelType *src_u, const PixelType *src_v,
                      int block_width_uv, int block_height_uv, ptrdiff_t stride_uv) {
 
    for (int y = 0; y < block_height_uv; y++) {
-      std::memcpy(dst_u, src_u, block_width_uv);
-      std::memcpy(dst_v, src_v, block_width_uv);
+      std::memcpy(dst_u, src_u, block_width_uv * sizeof(PixelType));
+      std::memcpy(dst_v, src_v, block_width_uv * sizeof(PixelType));
 
       dst_u += stride_uv;
       dst_v += stride_uv;
@@ -239,8 +249,9 @@ void copyChromaBlock(uint8_t *VS_RESTRICT dst_u, uint8_t *VS_RESTRICT dst_v,
 }
 
 
-int blockLumaDiff(const uint8_t *src1_y, const uint8_t *src2_y, int block_width, int block_height, ptrdiff_t stride_y) {
-   int diff = 0;
+template <typename PixelType>
+int64_t blockLumaDiff(const PixelType *src1_y, const PixelType *src2_y, int block_width, int block_height, ptrdiff_t stride_y) {
+   int64_t diff = 0;
 
    for (int y = 0; y < block_height; y++) {
       for (int x = 0; x < block_width; x++) {
@@ -255,6 +266,7 @@ int blockLumaDiff(const uint8_t *src1_y, const uint8_t *src2_y, int block_width,
 }
 
 
+template <typename PixelType>
 const VSFrame *VS_CC bifrostGetFrame(int n, int activationReason, void *instanceData, [[maybe_unused]] void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) noexcept {
    const BifrostData *d = static_cast<const BifrostData *>(instanceData);
 
@@ -299,28 +311,28 @@ const VSFrame *VS_CC bifrostGetFrame(int n, int activationReason, void *instance
          vsapi->mapDeleteKey(dst_props, blockDiffPropName);
 
 
-         const uint8_t *srcpp_u = vsapi->getReadPtr(srcpp, 1);
-         const uint8_t *srcpp_v = vsapi->getReadPtr(srcpp, 2);
+         const PixelType *srcpp_u = reinterpret_cast<const PixelType *>(vsapi->getReadPtr(srcpp, 1));
+         const PixelType *srcpp_v = reinterpret_cast<const PixelType *>(vsapi->getReadPtr(srcpp, 2));
 
-         const uint8_t *srcp_u = vsapi->getReadPtr(srcp, 1);
-         const uint8_t *srcp_v = vsapi->getReadPtr(srcp, 2);
+         const PixelType *srcp_u = reinterpret_cast<const PixelType *>(vsapi->getReadPtr(srcp, 1));
+         const PixelType *srcp_v = reinterpret_cast<const PixelType *>(vsapi->getReadPtr(srcp, 2));
 
-         const uint8_t *srcc_u = vsapi->getReadPtr(srcc, 1);
-         const uint8_t *srcc_v = vsapi->getReadPtr(srcc, 2);
+         const PixelType *srcc_u = reinterpret_cast<const PixelType *>(vsapi->getReadPtr(srcc, 1));
+         const PixelType *srcc_v = reinterpret_cast<const PixelType *>(vsapi->getReadPtr(srcc, 2));
 
-         const uint8_t *srcn_u = vsapi->getReadPtr(srcn, 1);
-         const uint8_t *srcn_v = vsapi->getReadPtr(srcn, 2);
+         const PixelType *srcn_u = reinterpret_cast<const PixelType *>(vsapi->getReadPtr(srcn, 1));
+         const PixelType *srcn_v = reinterpret_cast<const PixelType *>(vsapi->getReadPtr(srcn, 2));
 
-         const uint8_t *srcnn_u = vsapi->getReadPtr(srcnn, 1);
-         const uint8_t *srcnn_v = vsapi->getReadPtr(srcnn, 2);
+         const PixelType *srcnn_u = reinterpret_cast<const PixelType *>(vsapi->getReadPtr(srcnn, 1));
+         const PixelType *srcnn_v = reinterpret_cast<const PixelType *>(vsapi->getReadPtr(srcnn, 2));
 
-         const uint8_t *altsrcc_u = vsapi->getReadPtr(altsrcc, 1);
-         const uint8_t *altsrcc_v = vsapi->getReadPtr(altsrcc, 2);
+         const PixelType *altsrcc_u = reinterpret_cast<const PixelType *>(vsapi->getReadPtr(altsrcc, 1));
+         const PixelType *altsrcc_v = reinterpret_cast<const PixelType *>(vsapi->getReadPtr(altsrcc, 2));
 
-         uint8_t *dst_u = vsapi->getWritePtr(dst, 1);
-         uint8_t *dst_v = vsapi->getWritePtr(dst, 2);
+         PixelType *dst_u = reinterpret_cast<PixelType *>(vsapi->getWritePtr(dst, 1));
+         PixelType *dst_v = reinterpret_cast<PixelType *>(vsapi->getWritePtr(dst, 2));
 
-         ptrdiff_t stride_uv = vsapi->getStride(srcc, 1);
+         ptrdiff_t stride_uv = vsapi->getStride(srcc, 1) / static_cast<ptrdiff_t>(sizeof(PixelType));
 
          int block_width_uv = d->block_width_uv;
          int block_height_uv = d->block_height_uv;
@@ -489,8 +501,6 @@ void VS_CC bifrostCreate(const VSMap *in, VSMap *out, [[maybe_unused]] void *use
       if (d->block_width < 1 || d->block_height < 1)
          throw std::runtime_error("blockx and blocky must be greater than 0.");
 
-      d->luma_thresh = d->luma_thresh * d->block_width * d->block_height;
-
       d->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
       d->vi = vsapi->getVideoInfo(d->node);
 
@@ -504,12 +514,19 @@ void VS_CC bifrostCreate(const VSMap *in, VSMap *out, [[maybe_unused]] void *use
       if (!vsh::isConstantVideoFormat(d->vi) ||
           d->vi->format.colorFamily != cfYUV ||
           d->vi->format.sampleType != stInteger ||
-          d->vi->format.bitsPerSample != 8)
-         throw std::runtime_error("Only constant format 8 bit integer YUV allowed.");
+          d->vi->format.bitsPerSample < 8 ||
+          d->vi->format.bitsPerSample > 16)
+         throw std::runtime_error("Only constant format 8-16 bit integer YUV allowed.");
 
       if (!vsh::isSameVideoInfo(d->vi, altvi) ||
           d->vi->numFrames != altvi->numFrames)
          throw std::runtime_error("The two input clips must have the same format, dimensions and length.");
+
+      // Both thresholds are expressed in 8 bit sample units, so scale them to the clip's
+      // depth. luma_thresh is per pixel on input and becomes a whole-block sum here.
+      const int depthScale = 1 << (d->vi->format.bitsPerSample - 8);
+      d->luma_thresh = d->luma_thresh * d->block_width * d->block_height * depthScale;
+      d->variation *= depthScale;
 
       // These depend only on the format, which SeparateFields and BlockDiff leave
       // alone, so check them before invoking anything.
@@ -573,7 +590,9 @@ void VS_CC bifrostCreate(const VSMap *in, VSMap *out, [[maybe_unused]] void *use
 
       VSFilterDependency deps[2] = { {d->node, rpGeneral}, {d->altnode, rpStrictSpatial} };
 
-      vsapi->createVideoFilter(out, "Bifrost", d->vi, bifrostGetFrame, filterFree<BifrostData>, fmParallel, deps, 2, d.get(), core);
+      vsapi->createVideoFilter(out, "Bifrost", d->vi,
+         selectOnBitsPerSample(d->vi->format.bitsPerSample, bifrostGetFrame<uint8_t>, bifrostGetFrame<uint16_t>),
+         filterFree<BifrostData>, fmParallel, deps, 2, d.get(), core);
       d.release();
 
       if (interlaced) {
@@ -621,6 +640,7 @@ struct BlockDiffData {
 };
 
 
+template <typename PixelType>
 const VSFrame *VS_CC blockDiffGetFrame(int n, int activationReason, void *instanceData, [[maybe_unused]] void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) noexcept {
    const BlockDiffData *d = static_cast<const BlockDiffData *>(instanceData);
 
@@ -640,12 +660,12 @@ const VSFrame *VS_CC blockDiffGetFrame(int n, int activationReason, void *instan
          int blocks_x = d->blocks_x;
          int blocks_y = d->blocks_y;
 
-         std::unique_ptr<int[]> diffs{new int[static_cast<size_t>(blocks_x) * blocks_y]};
+         std::unique_ptr<int64_t[]> diffs{new int64_t[static_cast<size_t>(blocks_x) * blocks_y]};
 
-         const uint8_t *srcc_y = vsapi->getReadPtr(srcc, 0);
-         const uint8_t *srcn_y = vsapi->getReadPtr(srcn, 0);
+         const PixelType *srcc_y = reinterpret_cast<const PixelType *>(vsapi->getReadPtr(srcc, 0));
+         const PixelType *srcn_y = reinterpret_cast<const PixelType *>(vsapi->getReadPtr(srcn, 0));
 
-         ptrdiff_t stride_y = vsapi->getStride(srcc, 0);
+         ptrdiff_t stride_y = vsapi->getStride(srcc, 0) / static_cast<ptrdiff_t>(sizeof(PixelType));
 
          for (int y = 0; y < blocks_y; y++) {
             for (int x = 0; x < blocks_x; x++) {
@@ -658,7 +678,7 @@ const VSFrame *VS_CC blockDiffGetFrame(int n, int activationReason, void *instan
 
          dst = vsapi->copyFrame(srcc, core);
          VSMap *props = vsapi->getFramePropertiesRW(dst);
-         vsapi->mapSetData(props, blockDiffPropName, reinterpret_cast<const char *>(diffs.get()), static_cast<int>(blocks_x * blocks_y * sizeof(int)), dtBinary, maReplace);
+         vsapi->mapSetData(props, blockDiffPropName, reinterpret_cast<const char *>(diffs.get()), static_cast<int>(blocks_x * blocks_y * sizeof(int64_t)), dtBinary, maReplace);
       } catch (const std::exception &e) {
          vsapi->freeFrame(dst);
          dst = nullptr;
@@ -703,8 +723,9 @@ void VS_CC blockDiffCreate(const VSMap *in, VSMap *out, [[maybe_unused]] void *u
       if (!vsh::isConstantVideoFormat(d->vi) ||
           d->vi->format.colorFamily != cfYUV ||
           d->vi->format.sampleType != stInteger ||
-          d->vi->format.bitsPerSample != 8)
-         throw std::runtime_error("Only constant format 8 bit integer YUV allowed.");
+          d->vi->format.bitsPerSample < 8 ||
+          d->vi->format.bitsPerSample > 16)
+         throw std::runtime_error("Only constant format 8-16 bit integer YUV allowed.");
 
       d->blocks_x = d->vi->width / d->block_width;
       d->blocks_y = d->vi->height / d->block_height;
@@ -718,7 +739,9 @@ void VS_CC blockDiffCreate(const VSMap *in, VSMap *out, [[maybe_unused]] void *u
 
    VSFilterDependency deps[1] = { {d->node, rpGeneral} };
 
-   vsapi->createVideoFilter(out, "BlockDiff", d->vi, blockDiffGetFrame, filterFree<BlockDiffData>, fmParallel, deps, 1, d.get(), core);
+   vsapi->createVideoFilter(out, "BlockDiff", d->vi,
+      selectOnBitsPerSample(d->vi->format.bitsPerSample, blockDiffGetFrame<uint8_t>, blockDiffGetFrame<uint16_t>),
+      filterFree<BlockDiffData>, fmParallel, deps, 1, d.get(), core);
    d.release();
 }
 

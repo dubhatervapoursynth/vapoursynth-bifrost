@@ -21,7 +21,7 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX",
     "Operating System :: Unix",
-    "Programming Language :: C",
+    "Programming Language :: C++",
     "Topic :: Multimedia :: Video",
 ]
 dependencies = ["VapourSynth"]

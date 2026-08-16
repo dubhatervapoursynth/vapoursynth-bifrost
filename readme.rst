@@ -87,13 +87,23 @@ Installation
 Compilation
 ===========
 
-Requires VapourSynth to be installed and importable by the Python that Meson finds,
-because the include path is queried with ``vapoursynth.get_include()``.
+Requires Meson >= 1.2.3 and a C++17 compiler. VapourSynth must be installed and
+importable by the Python that Meson finds, because the include path is queried with
+``vapoursynth.get_include()``. That same interpreter also decides where the plugin
+installs (``<site-packages>/vapoursynth/plugins``).
 
 ::
 
     meson setup build
     ninja -C build
+
+If you have several Python installations, point Meson at the right one with a native
+file containing::
+
+    [binaries]
+    python = '/path/to/python'
+
+and passing ``--native-file`` to ``meson setup``.
 
 To build a wheel instead::
 

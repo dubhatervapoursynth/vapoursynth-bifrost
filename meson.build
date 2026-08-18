@@ -3,7 +3,7 @@ project('Bifrost', 'cpp',
     license: 'WTFPL',
     license_files: 'LICENSE',
     meson_version: '>=1.2.3',
-    version: '3.0',
+    version: '4.0',
 )
 
 py = import('python').find_installation(pure: false)

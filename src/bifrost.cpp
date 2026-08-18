@@ -749,7 +749,7 @@ void VS_CC blockDiffCreate(const VSMap *in, VSMap *out, [[maybe_unused]] void *u
 
 
 VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI *vspapi) {
-    vspapi->configPlugin("com.nodame.bifrost", "bifrost", "Bifrost plugin for VapourSynth", VS_MAKE_VERSION(3, 0), VS_MAKE_VERSION(VAPOURSYNTH_API_MAJOR, VAPOURSYNTH_API_MINOR), 0, plugin);
+    vspapi->configPlugin("com.nodame.bifrost", "bifrost", "Bifrost plugin for VapourSynth", VS_MAKE_VERSION(4, 0), VS_MAKE_VERSION(VAPOURSYNTH_API_MAJOR, VAPOURSYNTH_API_MINOR), 0, plugin);
     vspapi->registerFunction("Bifrost",
         "clip:vnode;"
         "altclip:vnode:opt;"
